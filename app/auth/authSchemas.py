@@ -5,7 +5,7 @@ class Token(BaseModel):
     token_type: str
 
 class TokenData(BaseModel):
-    correo: str | None = None
+    username: str | None = None
     rol: str | None = None
 
 class LoginData(BaseModel):
