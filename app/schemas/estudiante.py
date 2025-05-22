@@ -1,11 +1,18 @@
 from pydantic import BaseModel, EmailStr
-from typing import Optional, List
+from typing import Optional, List, Dict
 from enum import Enum
 
 class NivelRiesgo(str, Enum):
     ALTO = "ALTO"
     MEDIO = "MEDIO"
     BAJO = "BAJO"
+
+class TipoEstadistica(str, Enum):
+    PROMEDIO = "promedio"
+    COLEGIO = "colegio"
+    MUNICIPIO = "municipio"
+    NIVEL_RIESGO = "nivel_riesgo"
+    SEMESTRE = "semestre"
 
 class EstudianteBase(BaseModel):
     codigo: str
@@ -59,4 +66,22 @@ class EstudianteConRiesgo(BaseModel):
 
 class ListaEstudiantesResponse(BaseModel):
     estudiantes: List[EstudianteConRiesgo]
-    total: int 
+    total: int
+
+class EstadisticaItem(BaseModel):
+    etiqueta: str
+    cantidad: int
+    porcentaje: float
+
+class EstadisticaPromedio(BaseModel):
+    promedio_general: float
+    distribucion_niveles: List[EstadisticaItem]
+    rango_promedios: Dict[str, int]  # Ejemplo: {"0-1": 5, "1-2": 10, ...}
+
+class EstadisticaGeneral(BaseModel):
+    total_estudiantes: int
+    items: List[EstadisticaItem]
+
+class EstadisticasResponse(BaseModel):
+    tipo: TipoEstadistica
+    datos: EstadisticaPromedio | EstadisticaGeneral 

@@ -1,10 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
 from app.config.database import get_db
 from app.models.EstudianteModel import EstudianteModel
-from app.schemas.estudiante import EstudianteCreate, Estudiante, EstudianteUpdate, EstudianteConRiesgo, ListaEstudiantesResponse, NivelRiesgo
-from sqlalchemy import select, update, delete
+from app.schemas.estudiante import (
+    EstudianteCreate, Estudiante, EstudianteUpdate, 
+    EstudianteConRiesgo, ListaEstudiantesResponse, 
+    NivelRiesgo, TipoEstadistica, EstadisticasResponse,
+    EstadisticaPromedio, EstadisticaGeneral, EstadisticaItem
+)
+from sqlalchemy import select, update, delete, func, case
 from app.auth.authUtils import get_current_user
 from app.models.UsuarioModel import UsuarioModel
 from app.models.MetricaEvaluacionModel import MetricaEvaluacionModel
@@ -280,4 +285,226 @@ async def listar_estudiantes_usuario(
     return ListaEstudiantesResponse(
         estudiantes=estudiantes,
         total=total
-    ) 
+    )
+
+@router.get("/estadisticas/", response_model=EstadisticasResponse)
+async def obtener_estadisticas(
+    tipo: TipoEstadistica,
+    db: AsyncSession = Depends(get_db),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    # Base query para obtener estudiantes del usuario actual
+    base_query = select(EstudianteModel).join(
+        UsuarioEstudianteModel,
+        EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+    ).where(
+        UsuarioEstudianteModel.usuario_id == current_user.id
+    )
+
+    if tipo == TipoEstadistica.PROMEDIO:
+        # Obtener estadísticas de promedio
+        query = select(
+            func.avg(MetricaEvaluacionModel.promedio).label('promedio_general'),
+            func.count().label('total'),
+            func.sum(
+                case(
+                    (MetricaEvaluacionModel.promedio <= 1.0, 1),
+                    else_=0
+                )
+            ).label('rango_0_1'),
+            func.sum(
+                case(
+                    ((MetricaEvaluacionModel.promedio > 1.0) & (MetricaEvaluacionModel.promedio <= 2.0), 1),
+                    else_=0
+                )
+            ).label('rango_1_2'),
+            func.sum(
+                case(
+                    ((MetricaEvaluacionModel.promedio > 2.0) & (MetricaEvaluacionModel.promedio <= 3.0), 1),
+                    else_=0
+                )
+            ).label('rango_2_3'),
+            func.sum(
+                case(
+                    ((MetricaEvaluacionModel.promedio > 3.0) & (MetricaEvaluacionModel.promedio <= 4.0), 1),
+                    else_=0
+                )
+            ).label('rango_3_4'),
+            func.sum(
+                case(
+                    (MetricaEvaluacionModel.promedio > 4.0, 1),
+                    else_=0
+                )
+            ).label('rango_4_5')
+        ).select_from(
+            EstudianteModel
+        ).join(
+            UsuarioEstudianteModel,
+            EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+        ).join(
+            MetricaEvaluacionModel,
+            EstudianteModel.id == MetricaEvaluacionModel.estudiante_id
+        ).where(
+            UsuarioEstudianteModel.usuario_id == current_user.id
+        )
+
+        result = await db.execute(query)
+        stats = result.first()
+        
+        # Calcular distribución de niveles de riesgo
+        niveles = [
+            {"rango": (0.0, 1.0), "nivel": NivelRiesgo.ALTO},
+            {"rango": (1.1, 2.9), "nivel": NivelRiesgo.MEDIO},
+            {"rango": (3.0, 5.0), "nivel": NivelRiesgo.BAJO}
+        ]
+        
+        distribucion_niveles = []
+        total = stats.total if stats.total > 0 else 1
+
+        for nivel in niveles:
+            query_nivel = select(func.count()).select_from(
+                EstudianteModel
+            ).join(
+                UsuarioEstudianteModel,
+                EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+            ).join(
+                MetricaEvaluacionModel,
+                EstudianteModel.id == MetricaEvaluacionModel.estudiante_id
+            ).where(
+                UsuarioEstudianteModel.usuario_id == current_user.id,
+                MetricaEvaluacionModel.promedio >= nivel["rango"][0],
+                MetricaEvaluacionModel.promedio <= nivel["rango"][1]
+            )
+            
+            result_nivel = await db.execute(query_nivel)
+            cantidad = result_nivel.scalar()
+            
+            distribucion_niveles.append(
+                EstadisticaItem(
+                    etiqueta=nivel["nivel"].value,
+                    cantidad=cantidad,
+                    porcentaje=round((cantidad / total) * 100, 2)
+                )
+            )
+
+        return EstadisticasResponse(
+            tipo=tipo,
+            datos=EstadisticaPromedio(
+                promedio_general=round(stats.promedio_general, 2) if stats.promedio_general else 0.0,
+                distribucion_niveles=distribucion_niveles,
+                rango_promedios={
+                    "0-1": stats.rango_0_1,
+                    "1-2": stats.rango_1_2,
+                    "2-3": stats.rango_2_3,
+                    "3-4": stats.rango_3_4,
+                    "4-5": stats.rango_4_5
+                }
+            )
+        )
+
+    else:
+        # Para otros tipos de estadísticas (colegio, municipio, semestre)
+        group_by_column = None
+        join_model = None
+        
+        if tipo == TipoEstadistica.COLEGIO:
+            group_by_column = ColegioEgresadoModel.nombre
+            join_model = ColegioEgresadoModel
+            join_condition = (EstudianteModel.colegio_egresado_id == ColegioEgresadoModel.id)
+        elif tipo == TipoEstadistica.MUNICIPIO:
+            group_by_column = MunicipioNacimientoModel.nombre
+            join_model = MunicipioNacimientoModel
+            join_condition = (EstudianteModel.municipio_nacimiento_id == MunicipioNacimientoModel.id)
+        elif tipo == TipoEstadistica.SEMESTRE:
+            group_by_column = EstudianteModel.semestre
+        elif tipo == TipoEstadistica.NIVEL_RIESGO:
+            # Estadísticas por nivel de riesgo
+            query = select(
+                case(
+                    (MetricaEvaluacionModel.promedio <= 1.0, "ALTO"),
+                    (MetricaEvaluacionModel.promedio <= 2.9, "MEDIO"),
+                    else_="BAJO"
+                ).label('nivel'),
+                func.count().label('cantidad')
+            ).select_from(
+                EstudianteModel
+            ).join(
+                UsuarioEstudianteModel,
+                EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+            ).join(
+                MetricaEvaluacionModel,
+                EstudianteModel.id == MetricaEvaluacionModel.estudiante_id
+            ).where(
+                UsuarioEstudianteModel.usuario_id == current_user.id
+            ).group_by('nivel')
+            
+            result = await db.execute(query)
+            stats_raw = result.all()
+            
+            total = sum(item.cantidad for item in stats_raw)
+            items = [
+                EstadisticaItem(
+                    etiqueta=item.nivel,
+                    cantidad=item.cantidad,
+                    porcentaje=round((item.cantidad / total) * 100, 2)
+                )
+                for item in stats_raw
+            ]
+            
+            return EstadisticasResponse(
+                tipo=tipo,
+                datos=EstadisticaGeneral(
+                    total_estudiantes=total,
+                    items=items
+                )
+            )
+
+        # Consulta para otros tipos de estadísticas
+        if join_model:
+            query = select(
+                group_by_column.label('grupo'),
+                func.count().label('cantidad')
+            ).select_from(
+                EstudianteModel
+            ).join(
+                UsuarioEstudianteModel,
+                EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+            ).join(
+                join_model,
+                join_condition
+            ).where(
+                UsuarioEstudianteModel.usuario_id == current_user.id
+            ).group_by(group_by_column)
+        else:
+            query = select(
+                group_by_column.label('grupo'),
+                func.count().label('cantidad')
+            ).select_from(
+                EstudianteModel
+            ).join(
+                UsuarioEstudianteModel,
+                EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+            ).where(
+                UsuarioEstudianteModel.usuario_id == current_user.id
+            ).group_by(group_by_column)
+
+        result = await db.execute(query)
+        stats_raw = result.all()
+        
+        total = sum(item.cantidad for item in stats_raw)
+        items = [
+            EstadisticaItem(
+                etiqueta=str(item.grupo),
+                cantidad=item.cantidad,
+                porcentaje=round((item.cantidad / total) * 100, 2)
+            )
+            for item in stats_raw
+        ]
+        
+        return EstadisticasResponse(
+            tipo=tipo,
+            datos=EstadisticaGeneral(
+                total_estudiantes=total,
+                items=items
+            )
+        ) 
