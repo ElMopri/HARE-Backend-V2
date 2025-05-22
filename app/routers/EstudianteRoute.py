@@ -146,6 +146,7 @@ async def cargar_estudiantes_excel(
         municipios_dict = {mn.nombre: mn.id for mn in municipios.scalars().all()}
 
         estudiantes_creados = []
+        estudiantes_actualizados = []
         
         # Procesar cada fila del Excel
         for index, row in df.iterrows():
@@ -167,47 +168,88 @@ async def cargar_estudiantes_excel(
                 if not municipio:
                     raise ValueError(f"Municipio no encontrado: {row['Municipio Nacimiento']}")
 
-                # Crear estudiante
-                estudiante = EstudianteModel(
-                    codigo=str(row['Codigo Alumno']),
-                    nombre=str(row['Nombre Alumno']),
-                    tipo_documento_id=tipo_doc,
-                    documento=str(row['Documento']),
-                    semestre=str(row['Semestre']),
-                    pensum=str(row['Pensum']),
-                    ingreso=str(row['Ingreso']),
-                    estado_matricula_id=estado,
-                    celular=str(row['Celular']) if pd.notna(row['Celular']) else None,
-                    email_personal=str(row['Email']) if pd.notna(row['Email']) else None,
-                    email_institucional=str(row['Email Institucional']),
-                    colegio_egresado_id=colegio,
-                    municipio_nacimiento_id=municipio
+                # Verificar si el estudiante ya existe
+                estudiante_existente = await db.execute(
+                    select(EstudianteModel).where(
+                        (EstudianteModel.codigo == str(row['Codigo Alumno'])) &
+                        (EstudianteModel.documento == str(row['Documento']))
+                    )
                 )
-                db.add(estudiante)
+                estudiante = estudiante_existente.scalar_one_or_none()
+
+                if estudiante:
+                    # Actualizar estudiante existente
+                    estudiante.nombre = str(row['Nombre Alumno'])
+                    estudiante.tipo_documento_id = tipo_doc
+                    estudiante.semestre = str(row['Semestre'])
+                    estudiante.pensum = str(row['Pensum'])
+                    estudiante.ingreso = str(row['Ingreso'])
+                    estudiante.estado_matricula_id = estado
+                    estudiante.celular = str(row['Celular']) if pd.notna(row['Celular']) else None
+                    estudiante.email_personal = str(row['Email']) if pd.notna(row['Email']) else None
+                    estudiante.email_institucional = str(row['Email Institucional'])
+                    estudiante.colegio_egresado_id = colegio
+                    estudiante.municipio_nacimiento_id = municipio
+                    estudiantes_actualizados.append(estudiante)
+                else:
+                    # Crear nuevo estudiante
+                    estudiante = EstudianteModel(
+                        codigo=str(row['Codigo Alumno']),
+                        nombre=str(row['Nombre Alumno']),
+                        tipo_documento_id=tipo_doc,
+                        documento=str(row['Documento']),
+                        semestre=str(row['Semestre']),
+                        pensum=str(row['Pensum']),
+                        ingreso=str(row['Ingreso']),
+                        estado_matricula_id=estado,
+                        celular=str(row['Celular']) if pd.notna(row['Celular']) else None,
+                        email_personal=str(row['Email']) if pd.notna(row['Email']) else None,
+                        email_institucional=str(row['Email Institucional']),
+                        colegio_egresado_id=colegio,
+                        municipio_nacimiento_id=municipio
+                    )
+                    db.add(estudiante)
+                    estudiantes_creados.append(estudiante)
+
                 await db.flush()
 
-                # Crear métrica de evaluación
+                # Actualizar o crear métrica de evaluación
                 try:
                     promedio = float(row['Promedio'])
-                    # Redondear a 2 decimales
                     promedio = round(promedio, 2)
                 except (ValueError, TypeError):
                     raise ValueError(f"El promedio debe ser un número válido. Valor recibido: {row['Promedio']}")
 
-                metrica = MetricaEvaluacionModel(
-                    estudiante_id=estudiante.id,
-                    promedio=promedio
+                # Buscar métrica existente
+                metrica_existente = await db.execute(
+                    select(MetricaEvaluacionModel).where(
+                        MetricaEvaluacionModel.estudiante_id == estudiante.id
+                    )
                 )
-                db.add(metrica)
+                metrica = metrica_existente.scalar_one_or_none()
 
-                # Crear relación usuario-estudiante
-                usuario_estudiante = UsuarioEstudianteModel(
-                    usuario_id=current_user.id,
-                    estudiante_id=estudiante.id
+                if metrica:
+                    metrica.promedio = promedio
+                else:
+                    metrica = MetricaEvaluacionModel(
+                        estudiante_id=estudiante.id,
+                        promedio=promedio
+                    )
+                    db.add(metrica)
+
+                # Verificar y crear relación usuario-estudiante si no existe
+                relacion_existente = await db.execute(
+                    select(UsuarioEstudianteModel).where(
+                        (UsuarioEstudianteModel.usuario_id == current_user.id) &
+                        (UsuarioEstudianteModel.estudiante_id == estudiante.id)
+                    )
                 )
-                db.add(usuario_estudiante)
-                
-                estudiantes_creados.append(estudiante)
+                if not relacion_existente.scalar_one_or_none():
+                    usuario_estudiante = UsuarioEstudianteModel(
+                        usuario_id=current_user.id,
+                        estudiante_id=estudiante.id
+                    )
+                    db.add(usuario_estudiante)
 
             except Exception as row_error:
                 raise ValueError(f"Error en la fila {index + 2}: {str(row_error)}")
@@ -215,7 +257,11 @@ async def cargar_estudiantes_excel(
         # Guardar todos los cambios
         await db.commit()
 
-        return {"message": f"Se han cargado {len(estudiantes_creados)} estudiantes exitosamente"}
+        return {
+            "message": f"Proceso completado exitosamente",
+            "estudiantes_creados": len(estudiantes_creados),
+            "estudiantes_actualizados": len(estudiantes_actualizados)
+        }
 
     except ValueError as ve:
         await db.rollback()
