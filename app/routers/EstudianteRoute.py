@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
 from app.config.database import get_db
 from app.models.EstudianteModel import EstudianteModel
-from app.schemas.estudiante import EstudianteCreate, Estudiante, EstudianteUpdate
+from app.schemas.estudiante import EstudianteCreate, Estudiante, EstudianteUpdate, EstudianteConRiesgo, ListaEstudiantesResponse, NivelRiesgo
 from sqlalchemy import select, update, delete
 from app.auth.authUtils import get_current_user
 from app.models.UsuarioModel import UsuarioModel
@@ -215,4 +215,69 @@ async def cargar_estudiantes_excel(
         raise HTTPException(
             status_code=500,
             detail=f"Error interno al procesar el archivo: {str(e)}"
-        ) 
+        )
+
+def calcular_nivel_riesgo(promedio: float) -> NivelRiesgo:
+    if 0.0 <= promedio <= 1.0:
+        return NivelRiesgo.ALTO
+    elif 1.1 <= promedio <= 2.9:
+        return NivelRiesgo.MEDIO
+    else:
+        return NivelRiesgo.BAJO
+
+@router.get("/mis-estudiantes/", response_model=ListaEstudiantesResponse)
+async def listar_estudiantes_usuario(
+    db: AsyncSession = Depends(get_db),
+    current_user: UsuarioModel = Depends(get_current_user),
+    skip: int = 0,
+    limit: int = 100
+):
+    # Consulta para obtener los estudiantes del usuario con sus métricas
+    query = select(
+        EstudianteModel.codigo,
+        EstudianteModel.nombre,
+        EstudianteModel.semestre,
+        EstudianteModel.email_institucional,
+        MetricaEvaluacionModel.promedio
+    ).join(
+        UsuarioEstudianteModel,
+        EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+    ).join(
+        MetricaEvaluacionModel,
+        EstudianteModel.id == MetricaEvaluacionModel.estudiante_id
+    ).where(
+        UsuarioEstudianteModel.usuario_id == current_user.id
+    ).offset(skip).limit(limit)
+
+    result = await db.execute(query)
+    estudiantes_raw = result.all()
+
+    # Contar el total de estudiantes sin el límite
+    query_count = select(
+        EstudianteModel
+    ).join(
+        UsuarioEstudianteModel,
+        EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+    ).where(
+        UsuarioEstudianteModel.usuario_id == current_user.id
+    )
+    result_count = await db.execute(query_count)
+    total = len(result_count.scalars().all())
+
+    # Convertir los resultados al formato requerido
+    estudiantes = [
+        EstudianteConRiesgo(
+            codigo=estudiante.codigo,
+            nombre=estudiante.nombre,
+            semestre=estudiante.semestre,
+            email_institucional=estudiante.email_institucional,
+            nivel_riesgo=calcular_nivel_riesgo(estudiante.promedio),
+            promedio=round(estudiante.promedio, 2)
+        )
+        for estudiante in estudiantes_raw
+    ]
+
+    return ListaEstudiantesResponse(
+        estudiantes=estudiantes,
+        total=total
+    ) 

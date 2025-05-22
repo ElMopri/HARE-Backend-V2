@@ -1,5 +1,11 @@
 from pydantic import BaseModel, EmailStr
-from typing import Optional
+from typing import Optional, List
+from enum import Enum
+
+class NivelRiesgo(str, Enum):
+    ALTO = "ALTO"
+    MEDIO = "MEDIO"
+    BAJO = "BAJO"
 
 class EstudianteBase(BaseModel):
     codigo: str
@@ -38,4 +44,19 @@ class Estudiante(EstudianteBase):
     id: int
 
     class Config:
-        from_attributes = True 
+        from_attributes = True
+
+class EstudianteConRiesgo(BaseModel):
+    codigo: str
+    nombre: str
+    semestre: str
+    email_institucional: str
+    nivel_riesgo: NivelRiesgo
+    promedio: float
+
+    class Config:
+        from_attributes = True
+
+class ListaEstudiantesResponse(BaseModel):
+    estudiantes: List[EstudianteConRiesgo]
+    total: int 
