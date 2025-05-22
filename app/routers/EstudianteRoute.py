@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
 from app.config.database import get_db
@@ -20,8 +20,16 @@ from app.models.ColegioEgresadoModel import ColegioEgresadoModel
 from app.models.MunicipioNacimientoModel import MunicipioNacimientoModel
 import pandas as pd
 import io
+import matplotlib.pyplot as plt
+import base64
+from enum import Enum
 
 router = APIRouter(prefix="/estudiantes", tags=["estudiantes"])
+
+class TipoDiagrama(str, Enum):
+    BARRAS = "barras"
+    TORTA = "torta"
+    LINEAS = "lineas"
 
 @router.post("/", response_model=Estudiante)
 async def create_estudiante(
@@ -507,4 +515,54 @@ async def obtener_estadisticas(
                 total_estudiantes=total,
                 items=items
             )
-        ) 
+        )
+
+@router.get("/diagramas/")
+async def generar_diagrama(
+    tipo_estadistica: TipoEstadistica,
+    tipo_diagrama: TipoDiagrama,
+    db: AsyncSession = Depends(get_db),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    # Obtener los datos de las estadísticas
+    estadisticas = await obtener_estadisticas(tipo_estadistica, db, current_user)
+    
+    # Crear figura de matplotlib
+    plt.figure(figsize=(10, 6))
+    plt.clf()  # Limpiar la figura actual
+    
+    if tipo_estadistica == TipoEstadistica.PROMEDIO:
+        datos = estadisticas.datos.rango_promedios
+        labels = list(datos.keys())
+        values = list(datos.values())
+    else:
+        items = estadisticas.datos.items
+        labels = [item.etiqueta for item in items]
+        values = [item.cantidad for item in items]
+    
+    if tipo_diagrama == TipoDiagrama.BARRAS:
+        plt.bar(labels, values)
+        plt.xticks(rotation=45)
+        plt.ylabel('Cantidad')
+    elif tipo_diagrama == TipoDiagrama.TORTA:
+        plt.pie(values, labels=labels, autopct='%1.1f%%')
+    elif tipo_diagrama == TipoDiagrama.LINEAS:
+        plt.plot(labels, values, marker='o')
+        plt.xticks(rotation=45)
+        plt.ylabel('Cantidad')
+    
+    plt.title(f'Estadísticas por {tipo_estadistica}')
+    
+    # Guardar el gráfico en un buffer
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    
+    # Codificar la imagen en base64
+    imagen_base64 = base64.b64encode(buf.getvalue()).decode()
+    
+    return {
+        "tipo_estadistica": tipo_estadistica,
+        "tipo_diagrama": tipo_diagrama,
+        "imagen_base64": imagen_base64
+    } 
