@@ -7,11 +7,18 @@ from dotenv import load_dotenv
 # Cargar variables de entorno
 load_dotenv()
 
+PROTOCOLE = "postgresql+asyncpg"
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT")
+DB_DATABASE = os.getenv("DB_DATABASE")
+
+
+
+
 # Configuración de la base de datos
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    f"postgresql+asyncpg://{os.getenv('DATABASE_USER', 'postgres')}:{os.getenv('DATABASE_PASSWORD', 'tu_contraseña')}@{os.getenv('DATABASE_HOST', 'localhost')}:{os.getenv('DATABASE_PORT', '5432')}/{os.getenv('DATABASE_NAME', 'hare_db')}"
-)
+DATABASE_URL = f"{PROTOCOLE}://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_DATABASE}"
 
 # Crear el motor de la base de datos
 engine = create_async_engine(
