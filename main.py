@@ -8,10 +8,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from fastapi import Request
 
-@app.options("/auth/login")
-async def cors_preflight(request: Request):
-    return {"detail": "Preflight received"}
-
 app = FastAPI(
     title="HARE Backend",
     description="Backend para el sistema educativo HARE",
