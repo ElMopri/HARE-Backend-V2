@@ -15,7 +15,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://app93.proyectos.fireploy.online", "http://localhost:10001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
