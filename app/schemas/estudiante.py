@@ -85,3 +85,12 @@ class EstadisticaGeneral(BaseModel):
 class EstadisticasResponse(BaseModel):
     tipo: TipoEstadistica
     datos: EstadisticaPromedio | EstadisticaGeneral 
+
+class FiltrosEstudiante(BaseModel):
+    semestre: Optional[str] = None
+    ingreso: Optional[str] = None
+    colegio_egresado_id: Optional[int] = None
+    municipio_nacimiento_id: Optional[int] = None
+    promedio_min: Optional[float] = None
+    promedio_max: Optional[float] = None
+    nivel_riesgo: Optional[NivelRiesgo] = None 

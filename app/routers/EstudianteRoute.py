@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List
+from typing import List, Optional
 from app.config.database import get_db
 from app.models.EstudianteModel import EstudianteModel
 from app.schemas.estudiante import (
@@ -289,9 +289,16 @@ async def listar_estudiantes_usuario(
     db: AsyncSession = Depends(get_db),
     current_user: UsuarioModel = Depends(get_current_user),
     skip: int = 0,
-    limit: int = 100
+    limit: int = 100,
+    semestre: Optional[str] = None,
+    ingreso: Optional[str] = None,
+    colegio_egresado_id: Optional[int] = None,
+    municipio_nacimiento_id: Optional[int] = None,
+    promedio_min: Optional[float] = None,
+    promedio_max: Optional[float] = None,
+    nivel_riesgo: Optional[NivelRiesgo] = None
 ):
-    # Consulta para obtener los estudiantes del usuario con sus métricas
+    # Construir la consulta base
     query = select(
         EstudianteModel.codigo,
         EstudianteModel.nombre,
@@ -306,7 +313,34 @@ async def listar_estudiantes_usuario(
         EstudianteModel.id == MetricaEvaluacionModel.estudiante_id
     ).where(
         UsuarioEstudianteModel.usuario_id == current_user.id
-    ).offset(skip).limit(limit)
+    )
+
+    # Aplicar filtros
+    if semestre:
+        query = query.where(EstudianteModel.semestre == semestre)
+    if ingreso:
+        query = query.where(EstudianteModel.ingreso == ingreso)
+    if colegio_egresado_id:
+        query = query.where(EstudianteModel.colegio_egresado_id == colegio_egresado_id)
+    if municipio_nacimiento_id:
+        query = query.where(EstudianteModel.municipio_nacimiento_id == municipio_nacimiento_id)
+    if promedio_min is not None:
+        query = query.where(MetricaEvaluacionModel.promedio >= promedio_min)
+    if promedio_max is not None:
+        query = query.where(MetricaEvaluacionModel.promedio <= promedio_max)
+    if nivel_riesgo:
+        if nivel_riesgo == NivelRiesgo.ALTO:
+            query = query.where(MetricaEvaluacionModel.promedio <= 1.0)
+        elif nivel_riesgo == NivelRiesgo.MEDIO:
+            query = query.where(
+                (MetricaEvaluacionModel.promedio > 1.0) & 
+                (MetricaEvaluacionModel.promedio <= 2.9)
+            )
+        elif nivel_riesgo == NivelRiesgo.BAJO:
+            query = query.where(MetricaEvaluacionModel.promedio > 2.9)
+
+    # Aplicar paginación
+    query = query.offset(skip).limit(limit)
 
     result = await db.execute(query)
     estudiantes_raw = result.all()
@@ -320,6 +354,41 @@ async def listar_estudiantes_usuario(
     ).where(
         UsuarioEstudianteModel.usuario_id == current_user.id
     )
+
+    # Aplicar los mismos filtros a la consulta de conteo
+    if semestre:
+        query_count = query_count.where(EstudianteModel.semestre == semestre)
+    if ingreso:
+        query_count = query_count.where(EstudianteModel.ingreso == ingreso)
+    if colegio_egresado_id:
+        query_count = query_count.where(EstudianteModel.colegio_egresado_id == colegio_egresado_id)
+    if municipio_nacimiento_id:
+        query_count = query_count.where(EstudianteModel.municipio_nacimiento_id == municipio_nacimiento_id)
+    if promedio_min is not None:
+        query_count = query_count.join(
+            MetricaEvaluacionModel,
+            EstudianteModel.id == MetricaEvaluacionModel.estudiante_id
+        ).where(MetricaEvaluacionModel.promedio >= promedio_min)
+    if promedio_max is not None:
+        query_count = query_count.join(
+            MetricaEvaluacionModel,
+            EstudianteModel.id == MetricaEvaluacionModel.estudiante_id
+        ).where(MetricaEvaluacionModel.promedio <= promedio_max)
+    if nivel_riesgo:
+        query_count = query_count.join(
+            MetricaEvaluacionModel,
+            EstudianteModel.id == MetricaEvaluacionModel.estudiante_id
+        )
+        if nivel_riesgo == NivelRiesgo.ALTO:
+            query_count = query_count.where(MetricaEvaluacionModel.promedio <= 1.0)
+        elif nivel_riesgo == NivelRiesgo.MEDIO:
+            query_count = query_count.where(
+                (MetricaEvaluacionModel.promedio > 1.0) & 
+                (MetricaEvaluacionModel.promedio <= 2.9)
+            )
+        elif nivel_riesgo == NivelRiesgo.BAJO:
+            query_count = query_count.where(MetricaEvaluacionModel.promedio > 2.9)
+
     result_count = await db.execute(query_count)
     total = len(result_count.scalars().all())
 
@@ -611,4 +680,136 @@ async def generar_diagrama(
         "tipo_estadistica": tipo_estadistica,
         "tipo_diagrama": tipo_diagrama,
         "imagen_base64": imagen_base64
-    } 
+    }
+
+@router.get("/catalogos/colegios/", response_model=List[dict])
+async def obtener_colegios_indexados(
+    db: AsyncSession = Depends(get_db),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    query = select(
+        ColegioEgresadoModel.id,
+        ColegioEgresadoModel.nombre,
+        func.count(EstudianteModel.id).label('total_estudiantes')
+    ).join(
+        EstudianteModel,
+        ColegioEgresadoModel.id == EstudianteModel.colegio_egresado_id
+    ).join(
+        UsuarioEstudianteModel,
+        EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+    ).where(
+        UsuarioEstudianteModel.usuario_id == current_user.id
+    ).group_by(
+        ColegioEgresadoModel.id,
+        ColegioEgresadoModel.nombre
+    ).order_by(
+        ColegioEgresadoModel.nombre
+    )
+
+    result = await db.execute(query)
+    colegios = result.all()
+    
+    return [
+        {
+            "id": colegio.id,
+            "nombre": colegio.nombre,
+            "total_estudiantes": colegio.total_estudiantes
+        }
+        for colegio in colegios
+    ]
+
+@router.get("/catalogos/municipios/", response_model=List[dict])
+async def obtener_municipios_indexados(
+    db: AsyncSession = Depends(get_db),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    query = select(
+        MunicipioNacimientoModel.id,
+        MunicipioNacimientoModel.nombre,
+        func.count(EstudianteModel.id).label('total_estudiantes')
+    ).join(
+        EstudianteModel,
+        MunicipioNacimientoModel.id == EstudianteModel.municipio_nacimiento_id
+    ).join(
+        UsuarioEstudianteModel,
+        EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+    ).where(
+        UsuarioEstudianteModel.usuario_id == current_user.id
+    ).group_by(
+        MunicipioNacimientoModel.id,
+        MunicipioNacimientoModel.nombre
+    ).order_by(
+        MunicipioNacimientoModel.nombre
+    )
+
+    result = await db.execute(query)
+    municipios = result.all()
+    
+    return [
+        {
+            "id": municipio.id,
+            "nombre": municipio.nombre,
+            "total_estudiantes": municipio.total_estudiantes
+        }
+        for municipio in municipios
+    ]
+
+@router.get("/catalogos/semestres/", response_model=List[dict])
+async def obtener_semestres_indexados(
+    db: AsyncSession = Depends(get_db),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    query = select(
+        EstudianteModel.semestre,
+        func.count(EstudianteModel.id).label('total_estudiantes')
+    ).join(
+        UsuarioEstudianteModel,
+        EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+    ).where(
+        UsuarioEstudianteModel.usuario_id == current_user.id
+    ).group_by(
+        EstudianteModel.semestre
+    ).order_by(
+        EstudianteModel.semestre
+    )
+
+    result = await db.execute(query)
+    semestres = result.all()
+    
+    return [
+        {
+            "semestre": semestre.semestre,
+            "total_estudiantes": semestre.total_estudiantes
+        }
+        for semestre in semestres
+    ]
+
+@router.get("/catalogos/ingresos/", response_model=List[dict])
+async def obtener_ingresos_indexados(
+    db: AsyncSession = Depends(get_db),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    query = select(
+        EstudianteModel.ingreso,
+        func.count(EstudianteModel.id).label('total_estudiantes')
+    ).join(
+        UsuarioEstudianteModel,
+        EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+    ).where(
+        UsuarioEstudianteModel.usuario_id == current_user.id
+    ).group_by(
+        EstudianteModel.ingreso
+    ).order_by(
+        EstudianteModel.ingreso
+    )
+
+    result = await db.execute(query)
+    ingresos = result.all()
+    
+    return [
+        {
+            "ingreso": ingreso.ingreso,
+            "total_estudiantes": ingreso.total_estudiantes
+        }
+        for ingreso in ingresos
+    ] 
