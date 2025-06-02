@@ -6,6 +6,11 @@ from app.routers.CatalogoRoute import router as catalogo_router
 from app.auth.authRoutes import router as auth_router
 from fastapi.middleware.cors import CORSMiddleware
 
+from fastapi import Request
+
+@app.options("/auth/login")
+async def cors_preflight(request: Request):
+    return {"detail": "Preflight received"}
 
 app = FastAPI(
     title="HARE Backend",
