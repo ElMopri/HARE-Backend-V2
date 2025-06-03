@@ -290,6 +290,7 @@ async def listar_estudiantes_usuario(
     current_user: UsuarioModel = Depends(get_current_user),
     skip: int = 0,
     limit: int = 100,
+    nombre: Optional[str] = None,
     semestre: Optional[str] = None,
     ingreso: Optional[str] = None,
     colegio_egresado_id: Optional[int] = None,
@@ -316,6 +317,8 @@ async def listar_estudiantes_usuario(
     )
 
     # Aplicar filtros
+    if nombre:
+        query = query.where(EstudianteModel.nombre.ilike(f"%{nombre}%"))
     if semestre:
         query = query.where(EstudianteModel.semestre == semestre)
     if ingreso:
@@ -356,6 +359,8 @@ async def listar_estudiantes_usuario(
     )
 
     # Aplicar los mismos filtros a la consulta de conteo
+    if nombre:
+        query_count = query_count.where(EstudianteModel.nombre.ilike(f"%{nombre}%"))
     if semestre:
         query_count = query_count.where(EstudianteModel.semestre == semestre)
     if ingreso:

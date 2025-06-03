@@ -3,9 +3,9 @@ from typing import Optional, List, Dict
 from enum import Enum
 
 class NivelRiesgo(str, Enum):
-    ALTO = "ALTO"
-    MEDIO = "MEDIO"
-    BAJO = "BAJO"
+    ALTO = "Alto"
+    MEDIO = "Medio"
+    BAJO = "Bajo"
 
 class TipoEstadistica(str, Enum):
     PROMEDIO = "promedio"
@@ -87,6 +87,7 @@ class EstadisticasResponse(BaseModel):
     datos: EstadisticaPromedio | EstadisticaGeneral 
 
 class FiltrosEstudiante(BaseModel):
+    nombre: Optional[str] = None
     semestre: Optional[str] = None
     ingreso: Optional[str] = None
     colegio_egresado_id: Optional[int] = None
