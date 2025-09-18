@@ -113,9 +113,9 @@ async def update_estudiante(
     await db.refresh(db_estudiante)
     return db_estudiante
 
-@router.delete("/{estudiante_id}")
+@router.delete("/{codigo_estudiante}")
 async def delete_estudiante(
-    estudiante_id: int, 
+    codigo_estudiante: str, 
     db: AsyncSession = Depends(get_db),
     current_user: UsuarioModel = Depends(get_current_user)
 ):
@@ -124,7 +124,7 @@ async def delete_estudiante(
         UsuarioEstudianteModel,
         EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
     ).where(
-        EstudianteModel.id == estudiante_id,
+        EstudianteModel.codigo == codigo_estudiante,
         UsuarioEstudianteModel.usuario_id == current_user.id
     )
     result = await db.execute(query)
@@ -132,6 +132,9 @@ async def delete_estudiante(
     
     if estudiante is None:
         raise HTTPException(status_code=404, detail="Estudiante no encontrado o no tienes permisos para eliminarlo")
+    
+    # Obtener el ID del estudiante para las eliminaciones
+    estudiante_id = estudiante.id
     
     # Eliminar las métricas de evaluación primero
     delete_metricas = delete(MetricaEvaluacionModel).where(
@@ -151,7 +154,7 @@ async def delete_estudiante(
     await db.execute(delete_estudiante_query)
     await db.commit()
     
-    return {"message": "Estudiante eliminado exitosamente"}
+    return {"message": f"Estudiante con código {codigo_estudiante} eliminado exitosamente"}
 
 @router.post("/cargar-excel/")
 async def cargar_estudiantes_excel(
