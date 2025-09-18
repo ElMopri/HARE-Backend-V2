@@ -30,7 +30,7 @@ class EstudianteBase(BaseModel):
     municipio_nacimiento_id: int
 
 class EstudianteCreate(EstudianteBase):
-    pass
+    promedio: float
 
 class EstudianteUpdate(BaseModel):
     codigo: Optional[str] = None

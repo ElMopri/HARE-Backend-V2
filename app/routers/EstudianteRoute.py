@@ -37,8 +37,13 @@ async def create_estudiante(
     db: AsyncSession = Depends(get_db),
     current_user: UsuarioModel = Depends(get_current_user)
 ):
+    # Extraer el promedio del esquema
+    promedio = estudiante.promedio
+    estudiante_data = estudiante.dict()
+    estudiante_data.pop('promedio')  # Remover promedio del diccionario
+    
     # Crear el estudiante
-    db_estudiante = EstudianteModel(**estudiante.dict())
+    db_estudiante = EstudianteModel(**estudiante_data)
     db.add(db_estudiante)
     await db.commit()
     await db.refresh(db_estudiante)
@@ -49,6 +54,14 @@ async def create_estudiante(
         estudiante_id=db_estudiante.id
     )
     db.add(relacion_usuario_estudiante)
+    
+    # Crear la métrica de evaluación con el promedio
+    metrica_evaluacion = MetricaEvaluacionModel(
+        estudiante_id=db_estudiante.id,
+        promedio=round(promedio, 2)
+    )
+    db.add(metrica_evaluacion)
+    
     await db.commit()
     
     return db_estudiante
@@ -120,14 +133,20 @@ async def delete_estudiante(
     if estudiante is None:
         raise HTTPException(status_code=404, detail="Estudiante no encontrado o no tienes permisos para eliminarlo")
     
-    # Eliminar la relación usuario-estudiante primero
+    # Eliminar las métricas de evaluación primero
+    delete_metricas = delete(MetricaEvaluacionModel).where(
+        MetricaEvaluacionModel.estudiante_id == estudiante_id
+    )
+    await db.execute(delete_metricas)
+    
+    # Eliminar la relación usuario-estudiante
     delete_relacion = delete(UsuarioEstudianteModel).where(
         UsuarioEstudianteModel.estudiante_id == estudiante_id,
         UsuarioEstudianteModel.usuario_id == current_user.id
     )
     await db.execute(delete_relacion)
     
-    # Luego eliminar el estudiante
+    # Finalmente eliminar el estudiante
     delete_estudiante_query = delete(EstudianteModel).where(EstudianteModel.id == estudiante_id)
     await db.execute(delete_estudiante_query)
     await db.commit()
@@ -340,7 +359,7 @@ async def listar_estudiantes_usuario(
     ).join(
         UsuarioEstudianteModel,
         EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
-    ).join(
+    ).outerjoin(
         MetricaEvaluacionModel,
         EstudianteModel.id == MetricaEvaluacionModel.estudiante_id
     ).where(
@@ -385,6 +404,9 @@ async def listar_estudiantes_usuario(
     ).join(
         UsuarioEstudianteModel,
         EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+    ).outerjoin(
+        MetricaEvaluacionModel,
+        EstudianteModel.id == MetricaEvaluacionModel.estudiante_id
     ).where(
         UsuarioEstudianteModel.usuario_id == current_user.id
     )
@@ -401,20 +423,10 @@ async def listar_estudiantes_usuario(
     if municipio_nacimiento_id:
         query_count = query_count.where(EstudianteModel.municipio_nacimiento_id == municipio_nacimiento_id)
     if promedio_min is not None:
-        query_count = query_count.join(
-            MetricaEvaluacionModel,
-            EstudianteModel.id == MetricaEvaluacionModel.estudiante_id
-        ).where(MetricaEvaluacionModel.promedio >= promedio_min)
+        query_count = query_count.where(MetricaEvaluacionModel.promedio >= promedio_min)
     if promedio_max is not None:
-        query_count = query_count.join(
-            MetricaEvaluacionModel,
-            EstudianteModel.id == MetricaEvaluacionModel.estudiante_id
-        ).where(MetricaEvaluacionModel.promedio <= promedio_max)
+        query_count = query_count.where(MetricaEvaluacionModel.promedio <= promedio_max)
     if nivel_riesgo:
-        query_count = query_count.join(
-            MetricaEvaluacionModel,
-            EstudianteModel.id == MetricaEvaluacionModel.estudiante_id
-        )
         if nivel_riesgo == NivelRiesgo.ALTO:
             query_count = query_count.where(MetricaEvaluacionModel.promedio <= 1.0)
         elif nivel_riesgo == NivelRiesgo.MEDIO:
@@ -429,17 +441,19 @@ async def listar_estudiantes_usuario(
     total = len(result_count.scalars().all())
 
     # Convertir los resultados al formato requerido
-    estudiantes = [
-        EstudianteConRiesgo(
-            codigo=estudiante.codigo,
-            nombre=estudiante.nombre,
-            semestre=estudiante.semestre,
-            email_institucional=estudiante.email_institucional,
-            nivel_riesgo=calcular_nivel_riesgo(estudiante.promedio),
-            promedio=round(estudiante.promedio, 2)
+    estudiantes = []
+    for estudiante in estudiantes_raw:
+        promedio = estudiante.promedio if estudiante.promedio is not None else 0.0
+        estudiantes.append(
+            EstudianteConRiesgo(
+                codigo=estudiante.codigo,
+                nombre=estudiante.nombre,
+                semestre=estudiante.semestre,
+                email_institucional=estudiante.email_institucional,
+                nivel_riesgo=calcular_nivel_riesgo(promedio),
+                promedio=round(promedio, 2)
+            )
         )
-        for estudiante in estudiantes_raw
-    ]
 
     return ListaEstudiantesResponse(
         estudiantes=estudiantes,
