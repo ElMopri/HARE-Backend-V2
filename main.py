@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from fastapi import Request
 
+
+
 app = FastAPI(
     title="HARE Backend",
     description="Backend para el sistema educativo HARE",
@@ -27,6 +29,7 @@ app.include_router(auth_router)  # Primero incluimos el router de autenticación
 app.include_router(usuario_router)
 app.include_router(estudiante_router)
 app.include_router(catalogo_router)
+
 
 # Crear las tablas al iniciar la aplicación
 @app.on_event("startup")
