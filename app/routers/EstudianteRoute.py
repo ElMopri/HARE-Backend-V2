@@ -37,10 +37,20 @@ async def create_estudiante(
     db: AsyncSession = Depends(get_db),
     current_user: UsuarioModel = Depends(get_current_user)
 ):
+    # Crear el estudiante
     db_estudiante = EstudianteModel(**estudiante.dict())
     db.add(db_estudiante)
     await db.commit()
     await db.refresh(db_estudiante)
+    
+    # Crear la relación usuario-estudiante
+    relacion_usuario_estudiante = UsuarioEstudianteModel(
+        usuario_id=current_user.id,
+        estudiante_id=db_estudiante.id
+    )
+    db.add(relacion_usuario_estudiante)
+    await db.commit()
+    
     return db_estudiante
 
 @router.get("/", response_model=List[Estudiante])
@@ -96,11 +106,32 @@ async def delete_estudiante(
     db: AsyncSession = Depends(get_db),
     current_user: UsuarioModel = Depends(get_current_user)
 ):
-    query = delete(EstudianteModel).where(EstudianteModel.id == estudiante_id)
+    # Primero verificar que el estudiante existe y pertenece al usuario actual
+    query = select(EstudianteModel).join(
+        UsuarioEstudianteModel,
+        EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+    ).where(
+        EstudianteModel.id == estudiante_id,
+        UsuarioEstudianteModel.usuario_id == current_user.id
+    )
     result = await db.execute(query)
+    estudiante = result.scalar_one_or_none()
+    
+    if estudiante is None:
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado o no tienes permisos para eliminarlo")
+    
+    # Eliminar la relación usuario-estudiante primero
+    delete_relacion = delete(UsuarioEstudianteModel).where(
+        UsuarioEstudianteModel.estudiante_id == estudiante_id,
+        UsuarioEstudianteModel.usuario_id == current_user.id
+    )
+    await db.execute(delete_relacion)
+    
+    # Luego eliminar el estudiante
+    delete_estudiante_query = delete(EstudianteModel).where(EstudianteModel.id == estudiante_id)
+    await db.execute(delete_estudiante_query)
     await db.commit()
-    if result.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+    
     return {"message": "Estudiante eliminado exitosamente"}
 
 @router.post("/cargar-excel/")
