@@ -46,6 +46,7 @@ class EstudianteUpdate(BaseModel):
     email_institucional: Optional[EmailStr] = None
     colegio_egresado_id: Optional[int] = None
     municipio_nacimiento_id: Optional[int] = None
+    promedio: Optional[float] = None
 
 class Estudiante(EstudianteBase):
     id: int

@@ -37,6 +37,16 @@ async def create_estudiante(
     db: AsyncSession = Depends(get_db),
     current_user: UsuarioModel = Depends(get_current_user)
 ):
+    # Verificar que el código no exista
+    codigo_existente = await db.execute(
+        select(EstudianteModel).where(EstudianteModel.codigo == estudiante.codigo)
+    )
+    if codigo_existente.scalar_one_or_none():
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Ya existe un estudiante con el código {estudiante.codigo}"
+        )
+    
     # Extraer el promedio del esquema
     promedio = estudiante.promedio
     estudiante_data = estudiante.dict()
@@ -78,36 +88,91 @@ async def read_estudiantes(
     estudiantes = result.scalars().all()
     return estudiantes
 
-@router.get("/{estudiante_id}", response_model=Estudiante)
+@router.get("/{codigo_estudiante}", response_model=Estudiante)
 async def read_estudiante(
-    estudiante_id: int, 
+    codigo_estudiante: str, 
     db: AsyncSession = Depends(get_db),
     current_user: UsuarioModel = Depends(get_current_user)
 ):
-    query = select(EstudianteModel).where(EstudianteModel.id == estudiante_id)
+    # Verificar que el estudiante existe y pertenece al usuario actual
+    query = select(EstudianteModel).join(
+        UsuarioEstudianteModel,
+        EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+    ).where(
+        EstudianteModel.codigo == codigo_estudiante,
+        UsuarioEstudianteModel.usuario_id == current_user.id
+    )
     result = await db.execute(query)
     estudiante = result.scalar_one_or_none()
+    
     if estudiante is None:
-        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado o no tienes permisos para verlo")
+    
     return estudiante
 
-@router.put("/{estudiante_id}", response_model=Estudiante)
+@router.put("/{codigo_estudiante}", response_model=Estudiante)
 async def update_estudiante(
-    estudiante_id: int, 
+    codigo_estudiante: str, 
     estudiante: EstudianteUpdate, 
     db: AsyncSession = Depends(get_db),
     current_user: UsuarioModel = Depends(get_current_user)
 ):
-    query = select(EstudianteModel).where(EstudianteModel.id == estudiante_id)
+    # Verificar que el estudiante existe y pertenece al usuario actual
+    query = select(EstudianteModel).join(
+        UsuarioEstudianteModel,
+        EstudianteModel.id == UsuarioEstudianteModel.estudiante_id
+    ).where(
+        EstudianteModel.codigo == codigo_estudiante,
+        UsuarioEstudianteModel.usuario_id == current_user.id
+    )
     result = await db.execute(query)
     db_estudiante = result.scalar_one_or_none()
     
     if db_estudiante is None:
-        raise HTTPException(status_code=404, detail="Estudiante no encontrado")
+        raise HTTPException(status_code=404, detail="Estudiante no encontrado o no tienes permisos para actualizarlo")
 
+    # Extraer el promedio si está presente
+    promedio = estudiante.promedio
     update_data = estudiante.dict(exclude_unset=True)
+    update_data.pop('promedio', None)  # Remover promedio del diccionario de actualización
+    
+    # Verificar si se está cambiando el código y si ya existe
+    if 'codigo' in update_data and update_data['codigo'] != codigo_estudiante:
+        codigo_existente = await db.execute(
+            select(EstudianteModel).where(
+                EstudianteModel.codigo == update_data['codigo'],
+                EstudianteModel.id != db_estudiante.id
+            )
+        )
+        if codigo_existente.scalar_one_or_none():
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Ya existe un estudiante con el código {update_data['codigo']}"
+            )
+    
+    # Actualizar los campos del estudiante
     for key, value in update_data.items():
         setattr(db_estudiante, key, value)
+
+    # Actualizar o crear métrica de evaluación si se proporciona promedio
+    if promedio is not None:
+        # Buscar métrica existente
+        metrica_query = select(MetricaEvaluacionModel).where(
+            MetricaEvaluacionModel.estudiante_id == db_estudiante.id
+        )
+        metrica_result = await db.execute(metrica_query)
+        metrica = metrica_result.scalar_one_or_none()
+        
+        if metrica:
+            # Actualizar métrica existente
+            metrica.promedio = round(promedio, 2)
+        else:
+            # Crear nueva métrica
+            metrica = MetricaEvaluacionModel(
+                estudiante_id=db_estudiante.id,
+                promedio=round(promedio, 2)
+            )
+            db.add(metrica)
 
     await db.commit()
     await db.refresh(db_estudiante)
