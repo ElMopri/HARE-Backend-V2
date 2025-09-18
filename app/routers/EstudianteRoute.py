@@ -395,9 +395,9 @@ async def cargar_estudiantes_excel(
         )
 
 def calcular_nivel_riesgo(promedio: float) -> NivelRiesgo:
-    if 0.0 <= promedio <= 1.0:
+    if 0.0 <= promedio <= 1.5:
         return NivelRiesgo.ALTO
-    elif 1.1 <= promedio <= 2.9:
+    elif 1.6 <= promedio <= 2.9:
         return NivelRiesgo.MEDIO
     else:
         return NivelRiesgo.BAJO
