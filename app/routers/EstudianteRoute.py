@@ -50,7 +50,7 @@ async def create_estudiante(
     # Extraer el promedio del esquema
     promedio = estudiante.promedio
     estudiante_data = estudiante.dict()
-    # estudiante_data.pop('promedio')  # Remover promedio del diccionario
+    estudiante_data.pop('promedio')  # Remover promedio del diccionario
     
     # Crear el estudiante
     db_estudiante = EstudianteModel(**estudiante_data)
