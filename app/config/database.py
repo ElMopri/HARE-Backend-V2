@@ -2,23 +2,15 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 import os
-from dotenv import load_dotenv
 
-# Cargar variables de entorno
-load_dotenv()
+# Usar directamente DATABASE_URL de las variables de entorno de Render
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-PROTOCOLE = "postgresql+asyncpg"
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_HOST = os.getenv("DB_HOST")
-DB_PORT = os.getenv("DB_PORT")
-DB_DATABASE = os.getenv("DB_DATABASE")
+# Validación
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL environment variable is not set")
 
-
-
-
-# Configuración de la base de datos
-DATABASE_URL = f"{PROTOCOLE}://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_DATABASE}"
+print(f"DATABASE_URL: {DATABASE_URL}")  # Para debug (remover después)
 
 # Crear el motor de la base de datos
 engine = create_async_engine(
@@ -42,4 +34,4 @@ async def get_db():
         try:
             yield session
         finally:
-            await session.close() 
+            await session.close()
