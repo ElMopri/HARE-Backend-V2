@@ -8,8 +8,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from fastapi import Request
 
-
-
 app = FastAPI(
     title="HARE Backend",
     description="Backend para el sistema educativo HARE",
@@ -18,18 +16,21 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://app93.proyectos.fireploy.online", "http://localhost:10001"],
+    allow_origins=[
+        "https://app93.proyectos.fireploy.online", 
+        "http://localhost:10001",
+        "https://front-hare.netlify.app"  # ← Agregar esta línea
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Incluir los routers
-app.include_router(auth_router)  # Primero incluimos el router de autenticación
+app.include_router(auth_router)
 app.include_router(usuario_router)
 app.include_router(estudiante_router)
 app.include_router(catalogo_router)
-
 
 # Crear las tablas al iniciar la aplicación
 @app.on_event("startup")
