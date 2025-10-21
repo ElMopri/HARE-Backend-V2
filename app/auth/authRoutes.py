@@ -20,7 +20,7 @@ async def login(
 
 @router.post("/login/token", response_model=Token)
 async def login_for_token(
-    form_data: OAuth2PasswordRequestForm = Depends(),
+    form_data: OAuth2PasswordRequestForm = Depends(OAuth2PasswordRequestForm),
     db: AsyncSession = Depends(get_db)
 ):
     """Endpoint para iniciar sesión usando form-data (útil para Swagger UI)."""
