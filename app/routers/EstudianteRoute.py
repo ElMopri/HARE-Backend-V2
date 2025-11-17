@@ -22,7 +22,21 @@ import pandas as pd
 import io
 import matplotlib.pyplot as plt
 import base64
+import textwrap
+import math
+import os
+import asyncio
+try:
+    from google import genai
+except Exception:
+    genai = None
+import traceback
+import logging
 from enum import Enum
+from matplotlib.backends.backend_pdf import PdfPages
+from fastapi.responses import StreamingResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/estudiantes", tags=["estudiantes"])
 
@@ -194,10 +208,8 @@ async def delete_estudiante(
     )
     result = await db.execute(query)
     estudiante = result.scalar_one_or_none()
-    
     if estudiante is None:
         raise HTTPException(status_code=404, detail="Estudiante no encontrado o no tienes permisos para eliminarlo")
-    
     # Obtener el ID del estudiante para las eliminaciones
     estudiante_id = estudiante.id
     
@@ -799,6 +811,202 @@ async def generar_diagrama(
         "tipo_diagrama": tipo_diagrama,
         "imagen_base64": imagen_base64
     }
+
+
+@router.get("/report/pdf")
+async def exportar_reporte_pdf(
+    db: AsyncSession = Depends(get_db),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    """Genera un PDF que contiene todos los tipos de gráficos (barras, torta, líneas)
+    para cada tipo de estadística disponible. Cada gráfico incluye un título descriptivo.
+    """
+    # Buffer en memoria para el PDF
+    pdf_buffer = io.BytesIO()
+
+    # Parámetros de página: tamaño carta en pulgadas
+    LETTER_WIDTH_IN = 8.5
+    LETTER_HEIGHT_IN = 11.0
+    # Márgenes en mm -> pulgadas (usar margen más amplio para impresión)
+    # 12.7 mm = 0.5 in
+    MARGIN_MM = 12.7
+    margin_in = MARGIN_MM / 25.4
+
+    async def _generate_feedback(labels, values, tipo_est, tipo_diag):
+        """Solicita retroalimentación al modelo Gemini (Google GenAI).
+        Devuelve (texto, usado_externo: bool).
+        Si no es posible obtener texto de la IA, devuelve "No se pudo acceder a la IA".
+        """
+        total = sum(values) if values else 0
+
+        # Si no hay datos, devolvemos un mensaje corto
+        if total == 0:
+            return (f"Reporte: {tipo_est.value} — Gráfico: {tipo_diag.value}. No hay datos disponibles para este gráfico.", False)
+
+        # Preferir Gemini (Google) cuando se configure
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        print(f"[GEN_FEED] enter _generate_feedback | GEMINI_KEY present: {bool(gemini_key)} | genai loaded: {genai is not None}", flush=True)
+
+        if gemini_key and genai is not None:
+            try:
+                print("[GEN_FEED] intentando crear genai.Client con la clave proporcionada", flush=True)
+                client = genai.Client(api_key=gemini_key)
+                logger.info("Se creó genai.Client usando la clave proporcionada (no se muestra aquí por seguridad).")
+
+                items_text = "\n".join([f"- {lab}: {val}" for lab, val in zip(labels, values)])
+                prompt = f"""Eres un asistente que genera retroalimentación concisa y accionable en español para un gráfico estadístico.
+Datos:
+{items_text}
+
+Tipo de estadística: {tipo_est.value}. Tipo de diagrama: {tipo_diag.value}.
+
+Por favor, entrega en 3-5 frases: 1) resumen de los hallazgos principales, 2) observación sobre tendencias o distribución si aplica, 3) recomendación práctica breve.
+"""
+
+                print("[GEN_FEED] llamando a client.models.generate_content...", flush=True)
+                resp = await asyncio.to_thread(
+                    lambda: client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+                )
+                print("[GEN_FEED] client.models.generate_content devolvió respuesta", flush=True)
+
+                # Extraer el texto de la respuesta
+                text = None
+                try:
+                    if hasattr(resp, 'text'):
+                        text = resp.text
+                    elif isinstance(resp, dict):
+                        text = resp.get('text') or str(resp)
+                except Exception:
+                    text = str(resp)
+
+                text = (text or "").strip()
+                print(f"[GEN_FEED] texto extraído longitud: {len(text)}", flush=True)
+                logger.info("Gemini respondió correctamente (longitud %d).", len(text))
+                return (text, True)
+            except Exception as e:
+                # Print full traceback to console so operator can copy/paste the error
+                try:
+                    traceback.print_exc()
+                except Exception:
+                    pass
+                try:
+                    logger.exception("Error llamando a Gemini con la clave proporcionada: %s", str(e))
+                except Exception:
+                    print(f"[Gemini] Error al llamar la API con GEMINI_API_KEY: {e}", flush=True)
+                # Also print a short marker message to make the error easy to find in logs
+                print("[GENMI_ERROR] Exception al llamar a Gemini:", e, flush=True)
+
+        # Si no logramos obtener texto de Gemini, devolvemos mensaje indicando el fallo
+        logger.info("No se obtuvo respuesta válida de Gemini; devolviendo mensaje de error para el PDF.")
+        return ("No se pudo acceder a la IA", False)
+
+    # Crear el PDF y agregar una página por cada gráfico
+    with PdfPages(pdf_buffer) as pdf:
+        for tipo_est in TipoEstadistica:
+            estadisticas = await obtener_estadisticas(tipo_est, db, current_user)
+
+            for tipo_diag in TipoDiagrama:
+                # Preparar labels/values
+                if tipo_est == TipoEstadistica.PROMEDIO:
+                    datos = estadisticas.datos.rango_promedios
+                    labels = list(datos.keys())
+                    values = list(datos.values())
+                else:
+                    items = estadisticas.datos.items
+                    labels = [item.etiqueta for item in items]
+                    values = [item.cantidad for item in items]
+
+                # Crear figura tamaño carta
+                fig = plt.figure(figsize=(LETTER_WIDTH_IN, LETTER_HEIGHT_IN))
+                plt.clf()
+
+                # Definir áreas aprovechables dentro de márgenes
+                left = margin_in / LETTER_WIDTH_IN
+                right = 1 - left
+                bottom = margin_in / LETTER_HEIGHT_IN
+                top = 1 - bottom
+
+                # Reservar un 55% de altura para la imagen, 40% para la retroalimentación y 5% para título
+                # Esto da más espacio al texto y reduce solapamientos.
+                title_h = 0.05
+                image_h = 0.55
+                text_h = 0.40
+
+                # Axes para título
+                ax_title = fig.add_axes([left, top - title_h, right - left, title_h])
+                ax_title.axis('off')
+                titulo = f"{tipo_est.value} - {tipo_diag.value}"
+                ax_title.text(0.5, 0.5, titulo, ha='center', va='center', fontsize=14, weight='bold')
+
+                # Axes para la imagen centrada
+                img_bottom = bottom + text_h
+                img_height = image_h
+                ax_img = fig.add_axes([left, img_bottom, right - left, img_height])
+                ax_img.axis('off')
+
+                # Dibujar el gráfico dentro de ax_img
+                # Crear un eje interno para plotting con márgenes interiores
+                # Añadir un pequeño gap entre imagen y texto para evitar solapamientos
+                gap_h = 0.02
+                # Ajustar la altura de la imagen restando el gap (mantener el total de áreas)
+                img_height = img_height - gap_h
+                img_bottom = img_bottom + gap_h
+
+                ax_plot = fig.add_axes([
+                    left + 0.07*(right-left),
+                    img_bottom + 0.06*img_height,
+                    0.86*(right-left),
+                    0.88*img_height
+                ])
+
+                if sum(values) == 0:
+                    ax_plot.text(0.5, 0.5, 'No hay datos disponibles', horizontalalignment='center', verticalalignment='center')
+                    ax_plot.axis('off')
+                else:
+                    if tipo_diag == TipoDiagrama.BARRAS:
+                        ax_plot.bar(labels, values)
+                        for label in ax_plot.get_xticklabels():
+                            label.set_rotation(45)
+                        ax_plot.set_ylabel('Cantidad')
+                    elif tipo_diag == TipoDiagrama.TORTA:
+                        # Si demasiadas categorías, limitar etiquetas visibles
+                        if len(values) > 12:
+                            # agrupar pequeñas en 'Otros'
+                            combined = sorted(zip(labels, values), key=lambda x: x[1], reverse=True)
+                            top = combined[:11]
+                            others = combined[11:]
+                            labels_plot = [t[0] for t in top] + (['Otros'] if others else [])
+                            values_plot = [t[1] for t in top] + ([sum([o[1] for o in others])] if others else [])
+                            ax_plot.pie(values_plot, labels=labels_plot, autopct='%1.1f%%')
+                        else:
+                            ax_plot.pie(values, labels=labels, autopct='%1.1f%%')
+                    elif tipo_diag == TipoDiagrama.LINEAS:
+                        # Para lineas, usar índices como x si labels no numéricos
+                        x = list(range(len(values)))
+                        ax_plot.plot(x, values, marker='o')
+                        ax_plot.set_xticks(x)
+                        ax_plot.set_xticklabels(labels, rotation=45)
+                        ax_plot.set_ylabel('Cantidad')
+
+                # Axes para la retroalimentación (texto)
+                ax_text = fig.add_axes([left, bottom, right - left, text_h])
+                ax_text.axis('off')
+                feedback_text, used_ai = await _generate_feedback(labels, values, tipo_est, tipo_diag)
+                if used_ai:
+                    feedback_text = feedback_text + "\n\nGenerado por Google AI Studio"
+                # Wrap text a un ancho razonable (más estrecho para evitar cortes en página)
+                wrapped = textwrap.fill(feedback_text, width=90)
+                # Usar fuente más pequeña y margen interno
+                ax_text.text(0.02, 0.98, wrapped, ha='left', va='top', fontsize=9)
+
+                # Guardar la página
+                pdf.savefig(fig)
+                plt.close(fig)
+
+    pdf_buffer.seek(0)
+
+    headers = {"Content-Disposition": "attachment; filename=report_estadisticas.pdf"}
+    return StreamingResponse(pdf_buffer, media_type='application/pdf', headers=headers)
 
 @router.get("/catalogos/colegios/", response_model=List[dict])
 async def obtener_colegios_indexados(
