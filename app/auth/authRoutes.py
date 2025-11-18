@@ -15,7 +15,7 @@ async def login(
     db: AsyncSession = Depends(get_db)
 ):
     """Endpoint para iniciar sesión y obtener el token JWT."""
-    user = await authenticate_user(login_data.username, login_data.password, db)
+    user = await authenticate_user(login_data.correo, login_data.contraseña, db)
     return await login_for_access_token(user)
 
 @router.post("/login/token", response_model=Token)
