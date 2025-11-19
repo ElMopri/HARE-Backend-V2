@@ -36,6 +36,10 @@ from enum import Enum
 from matplotlib.backends.backend_pdf import PdfPages
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
+# Cargar variables de entorno
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +64,9 @@ async def generar_feedback(labels, values, tipo_est, tipo_diag):
         return (f"Reporte: {tipo_est.value} — Gráfico: {tipo_diag.value}. No hay datos disponibles para este gráfico.", False)
 
     gemini_key = os.getenv("GEMINI_API_KEY")
-    print(f"[GEN_FEED] generar_feedback | GEMINI_KEY present: {bool(gemini_key)} | genai loaded: {genai is not None}", flush=True)
+    gemini_key_length = len(gemini_key) if gemini_key else 0
+    print(f"[GEN_FEED] generar_feedback | GEMINI_KEY present: {bool(gemini_key)} | GEMINI_KEY length: {gemini_key_length} | genai loaded: {genai is not None}", flush=True)
+    logger.info(f"GEMINI_API_KEY está presente: {bool(gemini_key)}, longitud: {gemini_key_length}, genai cargado: {genai is not None}")
 
     if gemini_key and genai is not None:
         try:
@@ -82,19 +88,51 @@ Por favor, entrega en 3-5 frases: 1) resumen de los hallazgos principales, 2) ob
             resp = await asyncio.to_thread(
                 lambda: client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
             )
-            print("[GEN_FEED] client.models.generate_content devolvió respuesta", flush=True)
+            print(f"[GEN_FEED] client.models.generate_content devolvió respuesta. Tipo: {type(resp)}", flush=True)
 
             # Extraer el texto de la respuesta
             text = None
             try:
+                # Intentar diferentes formas de extraer el texto según la versión de la API
                 if hasattr(resp, 'text'):
                     text = resp.text
+                elif hasattr(resp, 'candidates') and resp.candidates:
+                    # Formato con candidates
+                    if hasattr(resp.candidates[0], 'content'):
+                        if hasattr(resp.candidates[0].content, 'parts'):
+                            text = resp.candidates[0].content.parts[0].text
+                        elif hasattr(resp.candidates[0].content, 'text'):
+                            text = resp.candidates[0].content.text
                 elif isinstance(resp, dict):
-                    text = resp.get('text') or str(resp)
-            except Exception:
+                    # Formato dict
+                    if 'text' in resp:
+                        text = resp['text']
+                    elif 'candidates' in resp and resp['candidates']:
+                        candidate = resp['candidates'][0]
+                        if 'content' in candidate:
+                            content = candidate['content']
+                            if 'parts' in content and content['parts']:
+                                text = content['parts'][0].get('text', '')
+                            elif 'text' in content:
+                                text = content['text']
+                elif hasattr(resp, '__str__'):
+                    text = str(resp)
+                    
+                # Si aún no tenemos texto, intentar convertir a string
+                if not text:
+                    text = str(resp)
+                    
+            except Exception as extract_error:
+                logger.warning(f"Error al extraer texto de la respuesta: {extract_error}")
+                print(f"[GEN_FEED] Error al extraer texto: {extract_error}", flush=True)
                 text = str(resp)
 
             text = (text or "").strip()
+            if not text:
+                logger.warning("La respuesta de Gemini está vacía")
+                print("[GEN_FEED] ADVERTENCIA: La respuesta de Gemini está vacía", flush=True)
+                return ("No se pudo obtener retroalimentación de la IA", False)
+                
             print(f"[GEN_FEED] texto extraído longitud: {len(text)}", flush=True)
             logger.info("Gemini respondió correctamente (longitud %d).", len(text))
             return (text, True)
@@ -108,6 +146,13 @@ Por favor, entrega en 3-5 frases: 1) resumen de los hallazgos principales, 2) ob
             except Exception:
                 print(f"[Gemini] Error al llamar la API con GEMINI_API_KEY: {e}", flush=True)
             print("[GENMI_ERROR] Exception al llamar a Gemini:", e, flush=True)
+    else:
+        if not gemini_key:
+            logger.warning("GEMINI_API_KEY no está configurada en las variables de entorno")
+            print("[GEN_FEED] ERROR: GEMINI_API_KEY no encontrada en variables de entorno", flush=True)
+        if genai is None:
+            logger.warning("El módulo 'google.genai' no está disponible. Verifica que 'google-genai' esté instalado.")
+            print("[GEN_FEED] ERROR: Módulo 'google.genai' no disponible. Instala con: pip install google-genai", flush=True)
 
     logger.info("No se obtuvo respuesta válida de Gemini; devolviendo mensaje de error.")
     return ("No se pudo acceder a la IA", False)
