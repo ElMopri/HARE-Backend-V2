@@ -35,6 +35,7 @@ import logging
 from enum import Enum
 from matplotlib.backends.backend_pdf import PdfPages
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,114 @@ class TipoDiagrama(str, Enum):
     BARRAS = "barras"
     TORTA = "torta"
     LINEAS = "lineas"
+
+
+async def generar_feedback(labels, values, tipo_est, tipo_diag):
+    """Generador independiente de retroalimentación.
+    Puede usarse desde otros módulos; devuelve (texto, usado_externo: bool).
+    Intenta llamar a Google Gemini si `GEMINI_API_KEY` está presente y el SDK `genai`
+    está cargado; en caso de fallo devuelve ("No se pudo acceder a la IA", False).
+    """
+    total = sum(values) if values else 0
+
+    # Mensaje corto si no hay datos
+    if total == 0:
+        return (f"Reporte: {tipo_est.value} — Gráfico: {tipo_diag.value}. No hay datos disponibles para este gráfico.", False)
+
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    print(f"[GEN_FEED] generar_feedback | GEMINI_KEY present: {bool(gemini_key)} | genai loaded: {genai is not None}", flush=True)
+
+    if gemini_key and genai is not None:
+        try:
+            print("[GEN_FEED] creando genai.Client con la clave proporcionada", flush=True)
+            client = genai.Client(api_key=gemini_key)
+            logger.info("Se creó genai.Client usando la clave proporcionada (no se muestra aquí por seguridad).")
+
+            items_text = "\n".join([f"- {lab}: {val}" for lab, val in zip(labels, values)])
+            prompt = f"""Eres un asistente que genera retroalimentación concisa y accionable en español para un gráfico estadístico.
+Datos:
+{items_text}
+
+Tipo de estadística: {tipo_est.value}. Tipo de diagrama: {tipo_diag.value}.
+
+Por favor, entrega en 3-5 frases: 1) resumen de los hallazgos principales, 2) observación sobre tendencias o distribución si aplica, 3) recomendación práctica breve.
+"""
+
+            print("[GEN_FEED] llamando a client.models.generate_content...", flush=True)
+            resp = await asyncio.to_thread(
+                lambda: client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+            )
+            print("[GEN_FEED] client.models.generate_content devolvió respuesta", flush=True)
+
+            # Extraer el texto de la respuesta
+            text = None
+            try:
+                if hasattr(resp, 'text'):
+                    text = resp.text
+                elif isinstance(resp, dict):
+                    text = resp.get('text') or str(resp)
+            except Exception:
+                text = str(resp)
+
+            text = (text or "").strip()
+            print(f"[GEN_FEED] texto extraído longitud: {len(text)}", flush=True)
+            logger.info("Gemini respondió correctamente (longitud %d).", len(text))
+            return (text, True)
+        except Exception as e:
+            try:
+                traceback.print_exc()
+            except Exception:
+                pass
+            try:
+                logger.exception("Error llamando a Gemini con la clave proporcionada: %s", str(e))
+            except Exception:
+                print(f"[Gemini] Error al llamar la API con GEMINI_API_KEY: {e}", flush=True)
+            print("[GENMI_ERROR] Exception al llamar a Gemini:", e, flush=True)
+
+    logger.info("No se obtuvo respuesta válida de Gemini; devolviendo mensaje de error.")
+    return ("No se pudo acceder a la IA", False)
+
+
+def _describe_chart_header(tipo_est: TipoEstadistica, tipo_diag: TipoDiagrama) -> str:
+    """Return a more descriptive header string explaining the chart content."""
+    diag_name = tipo_diag.value.capitalize()
+    if tipo_est == TipoEstadistica.PROMEDIO:
+        return f"Distribución de promedios de los estudiantes — {diag_name}"
+    if tipo_est == TipoEstadistica.COLEGIO:
+        return f"Número de estudiantes por colegio — {diag_name}"
+    if tipo_est == TipoEstadistica.MUNICIPIO:
+        return f"Distribución de estudiantes por municipio de nacimiento — {diag_name}"
+    if tipo_est == TipoEstadistica.SEMESTRE:
+        return f"Cantidad de estudiantes por semestre académico — {diag_name}"
+    if tipo_est == TipoEstadistica.NIVEL_RIESGO:
+        return f"Distribución por nivel de riesgo académico — {diag_name}"
+    # Fallback
+    return f"{tipo_est.value} — {diag_name}"
+
+
+class FeedbackRequest(BaseModel):
+    labels: List[str]
+    values: List[int]
+    tipo_est: TipoEstadistica
+    tipo_diag: TipoDiagrama
+
+
+@router.post("/feedback")
+async def generar_feedback_endpoint(
+    payload: FeedbackRequest,
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    """Endpoint que expone el generador de retroalimentación.
+    Requiere autenticación y devuelve JSON con el texto de retroalimentación
+    y si provino de la IA externa.
+    """
+    labels = payload.labels
+    values = payload.values
+    tipo_est = payload.tipo_est
+    tipo_diag = payload.tipo_diag
+
+    feedback_text, used_ai = await generar_feedback(labels, values, tipo_est, tipo_diag)
+    return {"feedback": feedback_text, "used_ai": used_ai}
 
 @router.post("/", response_model=Estudiante)
 async def create_estudiante(
@@ -832,76 +941,25 @@ async def exportar_reporte_pdf(
     MARGIN_MM = 12.7
     margin_in = MARGIN_MM / 25.4
 
-    async def _generate_feedback(labels, values, tipo_est, tipo_diag):
-        """Solicita retroalimentación al modelo Gemini (Google GenAI).
-        Devuelve (texto, usado_externo: bool).
-        Si no es posible obtener texto de la IA, devuelve "No se pudo acceder a la IA".
-        """
-        total = sum(values) if values else 0
-
-        # Si no hay datos, devolvemos un mensaje corto
-        if total == 0:
-            return (f"Reporte: {tipo_est.value} — Gráfico: {tipo_diag.value}. No hay datos disponibles para este gráfico.", False)
-
-        # Preferir Gemini (Google) cuando se configure
-        gemini_key = os.getenv("GEMINI_API_KEY")
-        print(f"[GEN_FEED] enter _generate_feedback | GEMINI_KEY present: {bool(gemini_key)} | genai loaded: {genai is not None}", flush=True)
-
-        if gemini_key and genai is not None:
-            try:
-                print("[GEN_FEED] intentando crear genai.Client con la clave proporcionada", flush=True)
-                client = genai.Client(api_key=gemini_key)
-                logger.info("Se creó genai.Client usando la clave proporcionada (no se muestra aquí por seguridad).")
-
-                items_text = "\n".join([f"- {lab}: {val}" for lab, val in zip(labels, values)])
-                prompt = f"""Eres un asistente que genera retroalimentación concisa y accionable en español para un gráfico estadístico.
-Datos:
-{items_text}
-
-Tipo de estadística: {tipo_est.value}. Tipo de diagrama: {tipo_diag.value}.
-
-Por favor, entrega en 3-5 frases: 1) resumen de los hallazgos principales, 2) observación sobre tendencias o distribución si aplica, 3) recomendación práctica breve.
-"""
-
-                print("[GEN_FEED] llamando a client.models.generate_content...", flush=True)
-                resp = await asyncio.to_thread(
-                    lambda: client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-                )
-                print("[GEN_FEED] client.models.generate_content devolvió respuesta", flush=True)
-
-                # Extraer el texto de la respuesta
-                text = None
-                try:
-                    if hasattr(resp, 'text'):
-                        text = resp.text
-                    elif isinstance(resp, dict):
-                        text = resp.get('text') or str(resp)
-                except Exception:
-                    text = str(resp)
-
-                text = (text or "").strip()
-                print(f"[GEN_FEED] texto extraído longitud: {len(text)}", flush=True)
-                logger.info("Gemini respondió correctamente (longitud %d).", len(text))
-                return (text, True)
-            except Exception as e:
-                # Print full traceback to console so operator can copy/paste the error
-                try:
-                    traceback.print_exc()
-                except Exception:
-                    pass
-                try:
-                    logger.exception("Error llamando a Gemini con la clave proporcionada: %s", str(e))
-                except Exception:
-                    print(f"[Gemini] Error al llamar la API con GEMINI_API_KEY: {e}", flush=True)
-                # Also print a short marker message to make the error easy to find in logs
-                print("[GENMI_ERROR] Exception al llamar a Gemini:", e, flush=True)
-
-        # Si no logramos obtener texto de Gemini, devolvemos mensaje indicando el fallo
-        logger.info("No se obtuvo respuesta válida de Gemini; devolviendo mensaje de error para el PDF.")
-        return ("No se pudo acceder a la IA", False)
+    # Usamos la función de nivel de módulo `generar_feedback` definida arriba.
+    # Esto evita duplicar la lógica y permite usar el generador desde otros módulos.
 
     # Crear el PDF y agregar una página por cada gráfico
     with PdfPages(pdf_buffer) as pdf:
+        # Página de portada: título y descripción
+        fig_cover = plt.figure(figsize=(LETTER_WIDTH_IN, LETTER_HEIGHT_IN))
+        ax_cover = fig_cover.add_axes([0, 0, 1, 1])
+        ax_cover.axis('off')
+        report_title = "Reporte Estadístico - Estudiantes"
+        report_description = (
+            "Este es el reporte generado automáticamente que contiene gráficos y retroalimentación por cada estadística.\n"
+            "Puede incluir hallazgos clave y recomendaciones."
+        )
+        ax_cover.text(0.5, 0.65, report_title, ha='center', va='center', fontsize=22, weight='bold')
+        ax_cover.text(0.5, 0.45, report_description, ha='center', va='center', fontsize=11)
+        pdf.savefig(fig_cover)
+        plt.close(fig_cover)
+
         for tipo_est in TipoEstadistica:
             estadisticas = await obtener_estadisticas(tipo_est, db, current_user)
 
@@ -926,38 +984,33 @@ Por favor, entrega en 3-5 frases: 1) resumen de los hallazgos principales, 2) ob
                 bottom = margin_in / LETTER_HEIGHT_IN
                 top = 1 - bottom
 
-                # Reservar un 55% de altura para la imagen, 40% para la retroalimentación y 5% para título
-                # Esto da más espacio al texto y reduce solapamientos.
-                title_h = 0.05
-                image_h = 0.55
-                text_h = 0.40
+                # Calcular áreas dentro de los márgenes y aplicar padding entre elementos
+                available_h = top - bottom
+                title_h = 0.08 * available_h          # espacio para el encabezado grande
+                gap_title_graph = 0.03 * available_h  # separación entre título y gráfico
+                graph_h = 0.58 * available_h          # espacio para el gráfico
+                gap_graph_text = 0.03 * available_h   # separación entre gráfico y texto
+                text_h = available_h - (title_h + gap_title_graph + graph_h + gap_graph_text)
 
-                # Axes para título
+                # Axes para título (encabezado formato descriptivo)
+                header_title = _describe_chart_header(tipo_est, tipo_diag)
                 ax_title = fig.add_axes([left, top - title_h, right - left, title_h])
                 ax_title.axis('off')
-                titulo = f"{tipo_est.value} - {tipo_diag.value}"
-                ax_title.text(0.5, 0.5, titulo, ha='center', va='center', fontsize=14, weight='bold')
+                ax_title.text(0.02, 0.5, header_title, ha='left', va='center', fontsize=14, weight='bold')
 
-                # Axes para la imagen centrada
-                img_bottom = bottom + text_h
-                img_height = image_h
+                # Axes para la imagen centrada (respetando padding)
+                img_bottom = bottom + text_h + gap_graph_text
+                img_height = graph_h
                 ax_img = fig.add_axes([left, img_bottom, right - left, img_height])
                 ax_img.axis('off')
 
-                # Dibujar el gráfico dentro de ax_img
-                # Crear un eje interno para plotting con márgenes interiores
-                # Añadir un pequeño gap entre imagen y texto para evitar solapamientos
-                gap_h = 0.02
-                # Ajustar la altura de la imagen restando el gap (mantener el total de áreas)
-                img_height = img_height - gap_h
-                img_bottom = img_bottom + gap_h
+                # Eje interno para plotting con márgenes interiores
+                inner_left = left + 0.05 * (right - left)
+                inner_width = 0.90 * (right - left)
+                inner_bottom = img_bottom + 0.06 * img_height
+                inner_height = 0.88 * img_height
 
-                ax_plot = fig.add_axes([
-                    left + 0.07*(right-left),
-                    img_bottom + 0.06*img_height,
-                    0.86*(right-left),
-                    0.88*img_height
-                ])
+                ax_plot = fig.add_axes([inner_left, inner_bottom, inner_width, inner_height])
 
                 if sum(values) == 0:
                     ax_plot.text(0.5, 0.5, 'No hay datos disponibles', horizontalalignment='center', verticalalignment='center')
@@ -991,13 +1044,18 @@ Por favor, entrega en 3-5 frases: 1) resumen de los hallazgos principales, 2) ob
                 # Axes para la retroalimentación (texto)
                 ax_text = fig.add_axes([left, bottom, right - left, text_h])
                 ax_text.axis('off')
-                feedback_text, used_ai = await _generate_feedback(labels, values, tipo_est, tipo_diag)
+                feedback_text, used_ai = await generar_feedback(labels, values, tipo_est, tipo_diag)
                 if used_ai:
                     feedback_text = feedback_text + "\n\nGenerado por Google AI Studio"
+
+                # Encabezado pequeño para la sección de retroalimentación
+                header_text = "Retroalimentación (IA Gemini)"
+                ax_text.text(0.02, 0.96, header_text, ha='left', va='top', fontsize=10, weight='bold')
+
                 # Wrap text a un ancho razonable (más estrecho para evitar cortes en página)
                 wrapped = textwrap.fill(feedback_text, width=90)
-                # Usar fuente más pequeña y margen interno
-                ax_text.text(0.02, 0.98, wrapped, ha='left', va='top', fontsize=9)
+                # Escribir el cuerpo de la retroalimentación debajo del encabezado
+                ax_text.text(0.02, 0.78, wrapped, ha='left', va='top', fontsize=9)
 
                 # Guardar la página
                 pdf.savefig(fig)
