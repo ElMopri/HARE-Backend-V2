@@ -922,6 +922,53 @@ async def generar_diagrama(
     }
 
 
+@router.get("/estadisticas/with-feedback")
+async def obtener_estadisticas_con_feedback(
+    tipo: TipoEstadistica,
+    tipo_diag: Optional[TipoDiagrama] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: UsuarioModel = Depends(get_current_user)
+):
+    """Devuelve las estadísticas (misma salida que `/estadisticas/`) y, adicionalmente,
+    una retroalimentación generada por Gemini para el diagrama indicado (o un diagrama por defecto).
+
+    Nota: No modifica el endpoint original `obtener_estadisticas`.
+    """
+    # Obtener las estadísticas existentes
+    estadisticas = await obtener_estadisticas(tipo, db, current_user)
+
+    # Elegir un tipo de diagrama por defecto si no se especifica
+    default_map = {
+        TipoEstadistica.PROMEDIO: TipoDiagrama.BARRAS,
+        TipoEstadistica.COLEGIO: TipoDiagrama.TORTA,
+        TipoEstadistica.MUNICIPIO: TipoDiagrama.TORTA,
+        TipoEstadistica.SEMESTRE: TipoDiagrama.BARRAS,
+        TipoEstadistica.NIVEL_RIESGO: TipoDiagrama.TORTA,
+    }
+    if tipo_diag is None:
+        tipo_diag = default_map.get(tipo, TipoDiagrama.BARRAS)
+
+    # Preparar labels y values igual que en el generador de diagramas
+    if tipo == TipoEstadistica.PROMEDIO:
+        datos = estadisticas.datos.rango_promedios
+        labels = list(datos.keys())
+        values = list(datos.values())
+    else:
+        items = estadisticas.datos.items
+        labels = [item.etiqueta for item in items]
+        values = [item.cantidad for item in items]
+
+    # Generar feedback usando la función reutilizable
+    feedback_text, used_ai = await generar_feedback(labels, values, tipo, tipo_diag)
+
+    return {
+        "estadisticas": estadisticas,
+        "diagram_type": tipo_diag,
+        "feedback": feedback_text,
+        "used_ai": used_ai
+    }
+
+
 @router.get("/report/pdf")
 async def exportar_reporte_pdf(
     db: AsyncSession = Depends(get_db),
